@@ -48,4 +48,11 @@ jobs:
       - name: Basic syntax check
         run: python -m compileall -q backend
 
+      - name: Run backend tests
+        env:
+          TEST_MODE: "true"
+        run: |
+          pip install pytest
+          pytest -q
+
 
