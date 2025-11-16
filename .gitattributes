@@ -1,0 +1,7 @@
+# Git LFS tracking для больших файлов данных
+# Файлы больше 10MB должны быть отслеживаемы через LFS
+# Большие CSV файлы (>10MB)
+car_prices.csv filter=lfs diff=lfs merge=lfs -text
+car_prices.xlsx filter=lfs diff=lfs merge=lfs -text
+# Тестовые файлы (опционально, можно добавить если станут большими)
+# test_cars-*.csv filter=lfs diff=lfs merge=lfs -text
