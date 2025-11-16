@@ -1,0 +1,18 @@
+# Для веб-сервера и переменных окружения
+Flask
+python-dotenv
+requests
+flask-cors
+# Для работы с нейросетями
+gigachat
+openai
+# Для генерации PDF
+WeasyPrint
+# Для работы с файлами данных
+pandas
+pdfplumber
+openpyxl  # для работы с Excel
+# Для обработки PDF и изображений
+Pillow  # для работы с изображениями
+pytesseract  # для OCR
+python-docx  # для структурированного текста
