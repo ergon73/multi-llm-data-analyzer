@@ -140,10 +140,33 @@
 
 ---
 
+## Выполненные задачи (продолжение)
+
+### ✅ ARCH-1: Декомпозировать AnalysisResult.tsx
+**Время:** ~2 часа  
+**Статус:** Завершено
+
+**Изменения:**
+- Создан компонент `ManualChart.tsx` для ручной визуализации (вынесена логика графика)
+- Создан компонент `LLMAnalysisDisplay.tsx` для отображения LLM анализа
+- Удалены неиспользуемые функции генерации PDF (generateAnalyticsOnlyPDF, generateDataOnlyPDF, generateFullPDF)
+- Упрощен AnalysisResult.tsx: удалена дублирующаяся логика, неиспользуемые интерфейсы и переменные
+
+**Результат:**
+- `AnalysisResult.tsx`: 649 строк → 237 строк (-63%)
+- Улучшена читаемость и поддерживаемость
+- Компоненты стали переиспользуемыми
+
+**Файлы:**
+- `frontend/src/components/AnalysisResult.tsx` (упрощен)
+- `frontend/src/components/ManualChart.tsx` (новый)
+- `frontend/src/components/LLMAnalysisDisplay.tsx` (новый)
+
+---
+
 ## Следующие шаги (не выполнены в этой сессии)
 
 ### HIGH приоритет:
-- [ ] ARCH-1: Декомпозировать `AnalysisResult.tsx` (649 строк)
 - [ ] ARCH-2: Разбить `App.tsx` (469 строк)
 
 ### MEDIUM приоритет:
@@ -163,6 +186,7 @@
 | CI запускается | Нет | Да | ✅ +100% |
 | Дублированный код | Да | Нет | ✅ Устранено |
 | fill-missing-ai сложность | O(N²) | O(N log N) | ✅ ~75% быстрее |
+| AnalysisResult.tsx размер | 649 строк | 237 строк | ✅ -63% |
 
 ---
 
