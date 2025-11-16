@@ -16,6 +16,7 @@ from backend.types import BasicAnalysis
 from bleach.sanitizer import Cleaner
 from backend.errors import register_error_handlers, ValidationError
 import time
+import hashlib
 
 # Настраиваем логирование
 logging.basicConfig(level=logging.DEBUG)
@@ -97,6 +98,36 @@ def _security_and_rate_limit():
         return jsonify({"error": "Too Many Requests", "retry_after": retry_after}), 429
     bucket.append(now)
     _rate_limit_store[cid] = bucket
+
+
+# Кэш анализа по (provider, model, dataset_hash)
+ANALYSIS_CACHE_TTL_SEC = int(os.getenv("ANALYSIS_CACHE_TTL_SEC", "600"))
+ANALYSIS_CACHE_MAX = int(os.getenv("ANALYSIS_CACHE_MAX", "256"))
+_analysis_cache: dict[str, tuple[float, str]] = {}
+
+
+def _make_analysis_key(provider: str, model: str, table_string: str) -> str:
+    h = hashlib.sha256(table_string.encode("utf-8")).hexdigest()
+    return f"{provider}:{model}:{h}"
+
+
+def _get_cached_analysis(key: str) -> Optional[str]:
+    item = _analysis_cache.get(key)
+    if not item:
+        return None
+    ts, val = item
+    if time.time() - ts <= ANALYSIS_CACHE_TTL_SEC:
+        return val
+    _analysis_cache.pop(key, None)
+    return None
+
+
+def _put_cached_analysis(key: str, value: str) -> None:
+    if len(_analysis_cache) >= ANALYSIS_CACHE_MAX:
+        # удаляем самый старый элемент
+        oldest_key = min(_analysis_cache, key=lambda k: _analysis_cache[k][0])
+        _analysis_cache.pop(oldest_key, None)
+    _analysis_cache[key] = (time.time(), value)
 
 
 def perform_basic_analysis(df: pd.DataFrame) -> BasicAnalysis:
@@ -348,8 +379,17 @@ def analyze():
         df = pd.DataFrame(table_data)
         table_string = df.to_string(index=False, max_rows=100)
         
-        # Получаем анализ от выбранной LLM
-        analysis = get_analysis(provider, model, table_string)
+        # Кэширование по (provider, model, dataset_hash)
+        cache_key = _make_analysis_key(provider, model, table_string)
+        cached = _get_cached_analysis(cache_key)
+        if cached is not None:
+            analysis = cached
+            logger.debug("Analysis cache hit")
+        else:
+            # Получаем анализ от выбранной LLM
+            analysis = get_analysis(provider, model, table_string)
+            _put_cached_analysis(cache_key, analysis)
+            logger.debug("Analysis cache miss; computed and cached")
         
         logger.debug(f"Analysis completed for {provider}:{model}")
         
