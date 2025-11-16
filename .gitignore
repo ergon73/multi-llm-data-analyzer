@@ -34,3 +34,11 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db 
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+frontend/build/
+
+# Python venv at project root
+.venv/
