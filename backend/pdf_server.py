@@ -19,6 +19,7 @@ import time
 import hashlib
 from itertools import islice
 from typing import Dict, Tuple, Any
+from collections import deque
 
 # Настраиваем логирование
 logging.basicConfig(level=logging.DEBUG)
@@ -69,31 +70,70 @@ CORS(app, resources={
     }
 })
 
-# Опциональная API-авторизация и наивный rate limiting
+# API-авторизация и rate limiting
 API_KEY = Config.API_KEY
 RATE_LIMIT_WINDOW_SEC = Config.RATE_LIMIT_WINDOW_SEC
 RATE_LIMIT_MAX_REQ = Config.RATE_LIMIT_MAX_REQ
-_rate_limit_store: dict[str, list[float]] = {}
+_rate_limit_store: dict[str, deque[float]] = {}
 
 def _client_id() -> str:
-    return request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
+    """
+    Извлекает идентификатор клиента для rate limiting.
+    Безопасно обрабатывает X-Forwarded-For (берет первый IP из цепочки прокси).
+    Не доверяет заголовку полностью - использует remote_addr как fallback.
+    """
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        # Берем первый IP из цепочки (клиентский IP)
+        # Разделяем по запятой и берем первый элемент
+        client_ip = forwarded.split(",")[0].strip()
+        # Валидируем что это похоже на IP (базовая проверка)
+        if client_ip and len(client_ip.split(".")) == 4:
+            return client_ip
+    # Fallback на реальный remote_addr
+    return request.remote_addr or "unknown"
+
+def _prune_bucket(bucket: deque[float], cutoff: float) -> None:
+    """Удаляет устаревшие записи из bucket (оптимизация памяти)."""
+    while bucket and bucket[0] <= cutoff:
+        bucket.popleft()
 
 @app.before_request
 def _security_and_rate_limit():
+    """
+    Проверяет авторизацию и применяет rate limiting для всех /api/ endpoints.
+    В TEST_MODE без API_KEY выдает предупреждение, но не блокирует.
+    """
     if not request.path.startswith("/api/"):
         return
-    if API_KEY:
-        provided = request.headers.get("X-API-Key")
-        if provided != API_KEY:
+    
+    # Проверка API ключа - обязательна (кроме TEST_MODE без ключа - только предупреждение)
+    provided = request.headers.get("X-API-Key")
+    if not API_KEY:
+        # В TEST_MODE без ключа разрешаем, но логируем предупреждение
+        if Config.TEST_MODE:
+            logger.warning("API_KEY not set - endpoints are open (TEST_MODE enabled)")
+        else:
+            logger.error("API_KEY not set in production mode - security risk!")
+            return jsonify({"error": "Server configuration error: API_KEY required"}), 500
+    else:
+        # API_KEY задан - проверяем обязательно
+        if not provided or provided != API_KEY:
             return jsonify({"error": "Unauthorized"}), 401
+    
+    # Rate limiting
     now = time.time()
     cid = _client_id()
-    bucket = _rate_limit_store.get(cid, [])
+    bucket = _rate_limit_store.get(cid, deque())
     cutoff = now - RATE_LIMIT_WINDOW_SEC
-    bucket = [ts for ts in bucket if ts > cutoff]
+    
+    # Очищаем устаревшие записи
+    _prune_bucket(bucket, cutoff)
+    
     if len(bucket) >= RATE_LIMIT_MAX_REQ:
         retry_after = int(bucket[0] + RATE_LIMIT_WINDOW_SEC - now) + 1
         return jsonify({"error": "Too Many Requests", "retry_after": retry_after}), 429
+    
     bucket.append(now)
     _rate_limit_store[cid] = bucket
 
@@ -126,6 +166,34 @@ def _put_cached_analysis(key: str, value: str) -> None:
         oldest_key = min(_analysis_cache, key=lambda k: _analysis_cache[k][0])
         _analysis_cache.pop(oldest_key, None)
     _analysis_cache[key] = (time.time(), value)
+
+
+def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
+    """
+    Нормализует запись данных: заменяет отсутствующие/NaN значения на дефолты.
+    
+    Args:
+        record: Словарь с данными записи
+        
+    Returns:
+        Нормализованный словарь с замененными значениями
+    """
+    required_fields = ['year', 'make', 'model', 'trim', 'body', 'transmission', 'vin', 
+                       'state', 'condition', 'odometer', 'color', 'interior', 'seller', 
+                       'mmr', 'sellingprice', 'saledate']
+    
+    for field in required_fields:
+        value = record.get(field)
+        # Проверяем отсутствие или NaN
+        if field not in record or pd.isna(value) or value == '':
+            if field == 'condition':
+                record[field] = 0.0
+            elif field in ['year', 'odometer', 'mmr', 'sellingprice']:
+                record[field] = 0
+            else:
+                record[field] = None
+    
+    return record
 
 
 # Простое хранилище загруженных датасетов (только для lifetime процесса)
@@ -368,26 +436,8 @@ def upload_file():
         # Преобразуем DataFrame в список словарей
         records = df_page.to_dict('records')
         
-        # Проверяем целостность данных и заменяем NaN на null
-        required_fields = ['year', 'make', 'model', 'trim', 'body', 'transmission', 'vin', 'state', 'condition', 'odometer', 'color', 'interior', 'seller', 'mmr', 'sellingprice', 'saledate']
-        
-        for record in records:
-            for field in required_fields:
-                if field not in record or pd.isna(record[field]):
-                    if field == 'condition':
-                        record[field] = 0.0
-                    elif field in ['year', 'odometer', 'mmr', 'sellingprice']:
-                        record[field] = 0
-                    else:
-                        record[field] = None
-                elif pd.isna(record[field]):
-                    # Заменяем NaN на null для JSON совместимости
-                    if field == 'condition':
-                        record[field] = 0.0
-                    elif field in ['year', 'odometer', 'mmr', 'sellingprice']:
-                        record[field] = 0
-                    else:
-                        record[field] = None
+        # Нормализуем записи (заменяем отсутствующие/NaN значения на дефолты)
+        records = [normalize_record(record) for record in records]
 
         # Выполняем базовый анализ (для CSV — по текущей странице как укороченный вариант)
         basic_analysis = perform_basic_analysis(df_for_analysis if not df_for_analysis.empty else df_page)
@@ -514,6 +564,10 @@ def generate_report():
 
 @app.route('/api/fill-missing-ai', methods=['POST'])
 def fill_missing_ai():
+    """
+    Оптимизированная версия fill-missing-ai с использованием groupby вместо квадратичных операций.
+    Сложность: O(N log N) вместо O(N²).
+    """
     try:
         data = request.get_json()
         if not data or 'table_data' not in data or 'columns' not in data or 'missing_info' not in data:
@@ -523,25 +577,78 @@ def fill_missing_ai():
         missing_info = data['missing_info']
         df = pd.DataFrame(table_data)
         recommendations = {}
+        
         for col in missing_info:
             recs = []
-            for idx, row in df[df[col].isna() | (df[col] == '')].iterrows():
-                mask = pd.Series([True] * len(df))
-                matched_fields = []
-                for c in columns:
-                    if c != col and pd.notna(row[c]) and row[c] != '':
-                        mask = mask & (df[c] == row[c])
-                        matched_fields.append(c)
-                candidates = df[mask & df[col].notna() & (df[col] != '')]
-                if not candidates.empty:
-                    value = candidates[col].mode().iloc[0]
-                    explanation = f"В похожих строках с такими же {', '.join(f'{c}={row[c]}' for c in matched_fields)} чаще всего встречается '{value}'."
-                    recs.append({'row_idx': int(idx), 'suggested': value, 'confidence': 1.0, 'explanation': explanation})
-                else:
-                    value = df[col].mode().iloc[0] if not df[col].mode().empty else None
-                    explanation = "Нет похожих строк, поэтому выбрано самое частое значение по всей колонке." if value is not None else "Нет данных для подсказки."
-                    recs.append({'row_idx': int(idx), 'suggested': value, 'confidence': 0.5, 'explanation': explanation})
+            # Находим строки с пропущенными значениями
+            missing_mask = df[col].isna() | (df[col] == '')
+            missing_rows = df[missing_mask].copy()
+            
+            if missing_rows.empty:
+                recommendations[col] = []
+                continue
+            
+            # Группируем по всем остальным колонкам (кроме текущей)
+            group_keys = [c for c in columns if c != col]
+            
+            # Вычисляем самое частое значение для каждой группы
+            # Используем только строки с заполненными значениями в текущей колонке
+            filled_df = df[~missing_mask]
+            
+            if not filled_df.empty and group_keys:
+                # Группируем заполненные строки и находим mode для каждой группы
+                grouped = filled_df.groupby(group_keys)[col].agg(
+                    lambda s: s.mode().iloc[0] if not s.mode().empty else None
+                ).to_dict()
+                
+                # Глобальное самое частое значение (fallback)
+                global_mode = df[col].mode().iloc[0] if not df[col].mode().empty else None
+                
+                # Обрабатываем каждую строку с пропуском
+                for idx, row in missing_rows.iterrows():
+                    # Формируем ключ группы из значений других колонок
+                    group_key = tuple(row[k] for k in group_keys if pd.notna(row[k]) and row[k] != '')
+                    
+                    # Пробуем найти значение по группе
+                    suggested = None
+                    confidence = 0.5
+                    matched_fields = []
+                    
+                    if group_key and group_key in grouped:
+                        suggested = grouped[group_key]
+                        confidence = 1.0
+                        matched_fields = [k for k in group_keys if pd.notna(row[k]) and row[k] != '']
+                    
+                    # Fallback на глобальное mode
+                    if suggested is None:
+                        suggested = global_mode
+                        confidence = 0.5
+                    
+                    explanation = (
+                        f"В похожих строках с такими же {', '.join(f'{c}={row[c]}' for c in matched_fields)} чаще всего встречается '{suggested}'."
+                        if matched_fields and suggested
+                        else ("Нет похожих строк, поэтому выбрано самое частое значение по всей колонке." if suggested is not None else "Нет данных для подсказки.")
+                    )
+                    
+                    recs.append({
+                        'row_idx': int(idx),
+                        'suggested': suggested,
+                        'confidence': confidence,
+                        'explanation': explanation
+                    })
+            else:
+                # Если нет заполненных строк или нет группирующих колонок - используем глобальный mode
+                global_mode = df[col].mode().iloc[0] if not df[col].mode().empty else None
+                for idx, row in missing_rows.iterrows():
+                    recs.append({
+                        'row_idx': int(idx),
+                        'suggested': global_mode,
+                        'confidence': 0.5,
+                        'explanation': "Нет похожих строк, поэтому выбрано самое частое значение по всей колонке." if global_mode is not None else "Нет данных для подсказки."
+                    })
+            
             recommendations[col] = recs
+        
         return jsonify({'recommendations': recommendations})
     except ValidationError as e:
         raise e
@@ -583,24 +690,8 @@ def get_upload_page():
 
         records = df_page.to_dict('records')
 
-        # Нормализуем NaN как в upload_file
-        required_fields = ['year', 'make', 'model', 'trim', 'body', 'transmission', 'vin', 'state', 'condition', 'odometer', 'color', 'interior', 'seller', 'mmr', 'sellingprice', 'saledate']
-        for record in records:
-            for field in required_fields:
-                if field not in record or pd.isna(record[field]):
-                    if field == 'condition':
-                        record[field] = 0.0
-                    elif field in ['year', 'odometer', 'mmr', 'sellingprice']:
-                        record[field] = 0
-                    else:
-                        record[field] = None
-                elif pd.isna(record[field]):
-                    if field == 'condition':
-                        record[field] = 0.0
-                    elif field in ['year', 'odometer', 'mmr', 'sellingprice']:
-                        record[field] = 0
-                    else:
-                        record[field] = None
+        # Нормализуем записи (используем общую функцию)
+        records = [normalize_record(record) for record in records]
 
         return jsonify({
             'table_data': records,

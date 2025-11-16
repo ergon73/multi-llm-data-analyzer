@@ -54,30 +54,37 @@ class Config:
     def validate(cls) -> None:
         """
         Проверяет наличие обязательных переменных окружения.
-        В TEST_MODE не требует LLM ключей.
+        В TEST_MODE не требует LLM ключей, но предупреждает об отсутствии API_KEY.
         
         Raises:
             ValueError: если отсутствуют обязательные переменные
         """
-        if cls.TEST_MODE:
-            return  # В тестовом режиме ключи не требуются
-        
         missing = []
+        warnings = []
         
-        # Проверяем только если не TEST_MODE
-        # OpenAI опционален (может использоваться только Yandex/Giga)
-        # Но хотя бы один провайдер должен быть настроен
-        has_any_provider = (
-            cls.OPENAI_API_KEY or
-            (cls.YANDEX_API_KEY and cls.YANDEX_FOLDER_ID) or
-            cls.GIGACHAT_CREDENTIALS
-        )
+        # В TEST_MODE не требуем LLM ключи, но проверяем API_KEY
+        if not cls.TEST_MODE:
+            # В production режиме требуем хотя бы один LLM провайдер
+            has_any_provider = (
+                cls.OPENAI_API_KEY or
+                (cls.YANDEX_API_KEY and cls.YANDEX_FOLDER_ID) or
+                cls.GIGACHAT_CREDENTIALS
+            )
+            
+            if not has_any_provider:
+                missing.append("At least one LLM provider must be configured (OPENAI_API_KEY, YANDEX_API_KEY+YANDEX_FOLDER_ID, or GIGACHAT_CREDENTIALS)")
         
-        if not has_any_provider:
-            missing.append("At least one LLM provider must be configured (OPENAI_API_KEY, YANDEX_API_KEY+YANDEX_FOLDER_ID, or GIGACHAT_CREDENTIALS)")
+        # API_KEY рекомендуется даже в TEST_MODE для безопасности
+        if not cls.API_KEY:
+            warnings.append("API_KEY is not set - API endpoints will be open to everyone (security risk!)")
         
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+        
+        if warnings:
+            import warnings as py_warnings
+            for warning in warnings:
+                py_warnings.warn(warning, UserWarning)
     
     @classmethod
     def get_debug_flag(cls) -> bool:
