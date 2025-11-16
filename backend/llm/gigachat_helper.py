@@ -2,6 +2,7 @@ import os
 import logging
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
+from backend.config import Config
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -12,12 +13,12 @@ def get_giga_response(user_prompt: str, model: str = "GigaChat:latest") -> str:
     В случае ошибки возвращает сообщение об ошибке.
     """
     # В тестовом режиме возвращаем заглушку
-    if os.getenv("TEST_MODE", "false").lower() == "true":
+    if Config.TEST_MODE:
         return "Тестовый режим: Здесь будет ответ от GigaChat. Для реальной работы укажите GIGACHAT_CREDENTIALS в .env"
 
     try:
-        credentials = os.getenv("GIGACHAT_CREDENTIALS")
-        cert_path = os.getenv("GIGACHAT_CERT_PATH", "russian_trusted_root_ca.cer")
+        credentials = Config.GIGACHAT_CREDENTIALS
+        cert_path = Config.GIGACHAT_CERT_PATH or "russian_trusted_root_ca.cer"
 
         if not credentials:
             logger.error("Не найдены учетные данные GigaChat в переменных окружения")

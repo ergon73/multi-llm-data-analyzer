@@ -17,3 +17,6 @@ openpyxl  # для работы с Excel
 Pillow  # для работы с изображениями
 pytesseract  # для OCR
 python-docx  # для структурированного текста
+# Для тестирования
+pytest
+pytest-cov

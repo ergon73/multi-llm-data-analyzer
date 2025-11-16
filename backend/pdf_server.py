@@ -7,7 +7,6 @@ import tempfile
 import os
 import json
 from typing import List, Optional
-from dotenv import load_dotenv
 from pathlib import Path
 from flask_cors import CORS
 import logging
@@ -15,6 +14,7 @@ from werkzeug.utils import secure_filename
 from backend.types import BasicAnalysis
 from bleach.sanitizer import Cleaner
 from backend.errors import register_error_handlers, ValidationError
+from backend.config import Config
 import time
 import hashlib
 from itertools import islice
@@ -24,11 +24,7 @@ from typing import Dict, Tuple, Any
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Загружаем переменные окружения как можно раньше, из КОРНЯ проекта (единый .env)
-_root_env_path = Path(__file__).resolve().parents[1] / '.env'
-load_dotenv(dotenv_path=_root_env_path)
-
-# Импортируем LLM-обработчик после загрузки .env, чтобы учитывался TEST_MODE и ключи
+# Импортируем LLM-обработчик после загрузки Config
 from llm.main_processor import get_analysis
 
 app = Flask(__name__)
@@ -74,9 +70,9 @@ CORS(app, resources={
 })
 
 # Опциональная API-авторизация и наивный rate limiting
-API_KEY = os.getenv("API_KEY")  # если не задан, проверка отключена
-RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "60"))
-RATE_LIMIT_MAX_REQ = int(os.getenv("RATE_LIMIT_MAX_REQ", "60"))
+API_KEY = Config.API_KEY
+RATE_LIMIT_WINDOW_SEC = Config.RATE_LIMIT_WINDOW_SEC
+RATE_LIMIT_MAX_REQ = Config.RATE_LIMIT_MAX_REQ
 _rate_limit_store: dict[str, list[float]] = {}
 
 def _client_id() -> str:
@@ -103,8 +99,8 @@ def _security_and_rate_limit():
 
 
 # Кэш анализа по (provider, model, dataset_hash)
-ANALYSIS_CACHE_TTL_SEC = int(os.getenv("ANALYSIS_CACHE_TTL_SEC", "600"))
-ANALYSIS_CACHE_MAX = int(os.getenv("ANALYSIS_CACHE_MAX", "256"))
+ANALYSIS_CACHE_TTL_SEC = Config.ANALYSIS_CACHE_TTL_SEC
+ANALYSIS_CACHE_MAX = Config.ANALYSIS_CACHE_MAX
 _analysis_cache: dict[str, tuple[float, str]] = {}
 
 
@@ -133,7 +129,7 @@ def _put_cached_analysis(key: str, value: str) -> None:
 
 
 # Простое хранилище загруженных датасетов (только для lifetime процесса)
-# dataset_id -> {'path': str, 'kind': 'csv'|'excel'|'pdf', 'columns': list[str], 'total_rows': int}
+# dataset_id -> {'dir': Path, 'path': str, 'kind': 'csv'|'excel'|'pdf', 'columns': list[str], 'total_rows': int, 'created_at': float}
 _datasets: Dict[str, Dict[str, Any]] = {}
 
 def _make_dataset_id(file_path: str) -> str:
@@ -321,9 +317,10 @@ def upload_file():
         # Ограничиваем размер страницы
         page_size = min(page_size, 5000)  # Максимум 5000 строк на страницу
 
-        # Сохраняем файл во временную директорию
+        # Создаём уникальную директорию для каждого загруженного файла
+        temp_dir = Path(tempfile.mkdtemp(prefix="vcb03_"))
         filename = secure_filename(file.filename) if file.filename else 'uploaded_file.csv'
-        temp_file_name = os.path.join(tempfile.gettempdir(), filename)
+        temp_file_name = str(temp_dir / filename)
         file.save(temp_file_name)
         
         # Определяем тип файла и обрабатываем соответственно
@@ -397,10 +394,12 @@ def upload_file():
 
         # Сохраняем метаданные датасета для последующих запросов страниц
         _datasets[dataset_id] = {
+            'dir': temp_dir,
             'path': temp_file_name,
             'kind': kind,
             'columns': columns,
             'total_rows': total_rows,
+            'created_at': time.time(),
         }
 
         # Формируем ответ
@@ -618,6 +617,31 @@ def get_upload_page():
         logger.exception("Error in /api/upload/page")
         raise
 
+def _cleanup_old_datasets():
+    """Удаляет старые датасеты из _datasets и их директории."""
+    now = time.time()
+    age_sec = Config.TEMP_CLEANUP_AGE_MIN * 60
+    to_remove = []
+    for dataset_id, meta in _datasets.items():
+        if now - meta.get('created_at', 0) > age_sec:
+            to_remove.append(dataset_id)
+            # Удаляем директорию
+            temp_dir = meta.get('dir')
+            if temp_dir and Path(temp_dir).exists():
+                try:
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp dir {temp_dir}: {e}")
+    for dataset_id in to_remove:
+        _datasets.pop(dataset_id, None)
+
+@app.before_request
+def _cleanup_before_request():
+    """Периодическая очистка старых датасетов."""
+    # Очищаем каждые 5 минут (проверяем каждый 100-й запрос примерно)
+    if len(_datasets) > 0 and time.time() % 300 < 1:
+        _cleanup_old_datasets()
+
 if __name__ == '__main__':
-    debug_flag = os.getenv('FLASK_DEBUG', '0') in ('1', 'true', 'True')
-    app.run(host='0.0.0.0', port=5000, debug=debug_flag)
+    app.run(host='0.0.0.0', port=5000, debug=Config.get_debug_flag())

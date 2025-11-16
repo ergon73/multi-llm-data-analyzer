@@ -1,8 +1,8 @@
-import os
 import logging
 import requests
 from typing import Optional
 import json
+from backend.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +14,11 @@ def get_yandex_response(user_prompt: str, model: str = "yandexgpt-lite", retries
     Предусмотрены повторные попытки в случае ошибки.
     """
     # В тестовом режиме возвращаем заглушку
-    if os.getenv("TEST_MODE", "false").lower() == "true":
+    if Config.TEST_MODE:
         return "Тестовый режим: Здесь будет ответ от YandexGPT. Для реальной работы укажите YANDEX_FOLDER_ID и YANDEX_API_KEY в .env"
 
-    folder_id = os.getenv("YANDEX_FOLDER_ID")
-    iam_token = os.getenv("YANDEX_API_KEY")
+    folder_id = Config.YANDEX_FOLDER_ID
+    iam_token = Config.YANDEX_API_KEY
     
     logger.debug(f"Используется YANDEX_FOLDER_ID: {folder_id}")
     

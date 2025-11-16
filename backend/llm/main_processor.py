@@ -1,5 +1,5 @@
 # Этот файл будет центральной точкой для вызова любой LLM
-import os
+from backend.config import Config
 from . import yandex_gpt_helper, gigachat_helper, openai_helper
 
 def get_analysis(provider: str, model: str, table_data: str) -> str:
@@ -12,7 +12,7 @@ def get_analysis(provider: str, model: str, table_data: str) -> str:
     :return: Текстовый отчет от LLM
     """
     # Проверяем тестовый режим
-    if os.getenv("TEST_MODE", "false").lower() == "true":
+    if Config.TEST_MODE:
         return f"""Тестовый режим активен. Анализ данных:
         
 Провайдер: {provider}

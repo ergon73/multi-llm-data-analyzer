@@ -1,6 +1,6 @@
-import os
 import logging
 from openai import OpenAI
+from backend.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -11,10 +11,10 @@ def get_openai_response(user_prompt: str, model: str = "gpt-4", retries=3) -> st
     Отправляет запрос к OpenAI и возвращает ответ.
     """
     # В тестовом режиме возвращаем заглушку
-    if os.getenv("TEST_MODE", "false").lower() == "true":
+    if Config.TEST_MODE:
         return "Тестовый режим: Здесь будет ответ от OpenAI. Для реальной работы укажите OPENAI_API_KEY в .env"
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = Config.OPENAI_API_KEY
     if not api_key:
         logger.error("Не найден API ключ OpenAI в переменных окружения")
         return "Ошибка конфигурации OpenAI. Обратитесь к администратору."
