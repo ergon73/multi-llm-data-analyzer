@@ -23,17 +23,22 @@ from backend.types import (
     UploadPageResponse,
     TestResponse
 )
-from backend.services import AnalysisCache, perform_basic_analysis
+from backend.services import AnalysisCache, perform_basic_analysis, get_incremental_analysis
 from bleach.sanitizer import Cleaner
 from backend.errors import register_error_handlers, ValidationError
 from backend.config import Config
+from backend.logging_config import setup_logging, generate_correlation_id, get_correlation_id
 import time
 import hashlib
 from itertools import islice
 from collections import deque
 
-# Настраиваем логирование
-logging.basicConfig(level=logging.DEBUG)
+# Настраиваем логирование с JSON форматом и correlation IDs
+setup_logging(
+    level=Config.LOG_LEVEL,
+    json_format=Config.LOG_JSON_FORMAT,
+    log_file=Config.LOG_FILE
+)
 logger = logging.getLogger(__name__)
 
 # Импортируем LLM-обработчик после загрузки Config
@@ -109,6 +114,30 @@ def _prune_bucket(bucket: deque[float], cutoff: float) -> None:
     """Удаляет устаревшие записи из bucket (оптимизация памяти)."""
     while bucket and bucket[0] <= cutoff:
         bucket.popleft()
+
+@app.before_request
+def _set_correlation_id() -> None:
+    """
+    Устанавливает correlation ID для каждого запроса.
+    Использует X-Correlation-ID из заголовка или генерирует новый.
+    """
+    from flask import g, after_this_request
+    
+    # Проверяем есть ли correlation ID в заголовке запроса
+    correlation_id = request.headers.get('X-Correlation-ID')
+    if not correlation_id:
+        # Генерируем новый correlation ID
+        correlation_id = generate_correlation_id()
+    
+    # Сохраняем в Flask g для доступа в других частях приложения
+    g.correlation_id = correlation_id
+    
+    # Добавляем в response заголовки для клиента
+    @after_this_request
+    def add_correlation_id_header(response: Response) -> Response:
+        response.headers['X-Correlation-ID'] = correlation_id
+        return response
+
 
 @app.before_request
 def _security_and_rate_limit() -> Optional[Response]:
@@ -441,6 +470,8 @@ def upload_file() -> Response:
         
         dataset_id = _make_dataset_id(temp_file_name)
 
+        incremental_analysis = get_incremental_analysis()
+        
         if file_extension.endswith('.csv'):
             # CSV: считаем общее число строк быстро и читаем только нужную страницу
             total_rows = _csv_count_rows_fast(temp_file_name)
@@ -453,20 +484,25 @@ def upload_file() -> Response:
                     columns = []
             df_for_analysis = df_page  # быстрый анализ по текущей странице
             kind = 'csv'
+            cached_df = None  # CSV не кэшируем полностью
         elif file_extension.endswith(('.xlsx', '.xls')):
+            # Excel: читаем полностью и кэшируем DataFrame
             df = process_excel(temp_file_name)
             total_rows = len(df)
             df_page = df.iloc[(page - 1) * page_size: (page - 1) * page_size + page_size]
             columns = df.columns.tolist()
-            df_for_analysis = df
+            df_for_analysis = df_page  # Анализ только текущей страницы
             kind = 'excel'
+            cached_df = df  # Кэшируем полный DataFrame
         elif file_extension.endswith('.pdf'):
+            # PDF: читаем полностью и кэшируем DataFrame
             df = process_pdf(temp_file_name)
             total_rows = len(df)
             df_page = df.iloc[(page - 1) * page_size: (page - 1) * page_size + page_size]
             columns = df.columns.tolist()
-            df_for_analysis = df
+            df_for_analysis = df_page  # Анализ только текущей страницы
             kind = 'pdf'
+            cached_df = df  # Кэшируем полный DataFrame
         else:
             raise ValidationError("Unsupported file format")
             
@@ -484,8 +520,13 @@ def upload_file() -> Response:
         # Нормализуем записи (заменяем отсутствующие/NaN значения на дефолты)
         records = [normalize_record(record) for record in records]
 
-        # Выполняем базовый анализ (для CSV — по текущей странице как укороченный вариант)
-        basic_analysis = perform_basic_analysis(df_for_analysis if not df_for_analysis.empty else df_page)
+        # Используем инкрементальный анализ
+        if page == 1:
+            # Первая страница - инициализируем анализ
+            basic_analysis = incremental_analysis.initialize_analysis(dataset_id, df_page)
+        else:
+            # Последующие страницы - обновляем анализ инкрементально
+            basic_analysis = incremental_analysis.update_analysis(dataset_id, df_page)
 
         # Сохраняем метаданные датасета для последующих запросов страниц
         _datasets[dataset_id] = {
@@ -495,6 +536,7 @@ def upload_file() -> Response:
             'columns': columns,
             'total_rows': total_rows,
             'created_at': time.time(),
+            'cached_df': cached_df,  # Кэшированный DataFrame для Excel/PDF
         }
 
         # Формируем ответ
@@ -768,17 +810,31 @@ def get_upload_page() -> Response:
         columns = meta['columns']
         total_rows = int(meta['total_rows'])
         total_pages = (total_rows + page_size - 1) // page_size if total_rows > 0 else 1
+        cached_df = meta.get('cached_df')  # Кэшированный DataFrame для Excel/PDF
+
+        incremental_analysis = get_incremental_analysis()
 
         if kind == 'csv':
+            # CSV: читаем страницу напрямую из файла
             df_page, _ = _csv_get_page(file_path, page, page_size)
             if not columns:
                 columns = df_page.columns.tolist()
         elif kind == 'excel':
-            df = process_excel(file_path)
+            # Excel: используем кэшированный DataFrame если есть, иначе читаем заново
+            if cached_df is not None:
+                df = cached_df
+            else:
+                df = process_excel(file_path)
+                meta['cached_df'] = df  # Кэшируем для следующих запросов
             start_idx = (page - 1) * page_size
             df_page = df.iloc[start_idx:start_idx + page_size]
         elif kind == 'pdf':
-            df = process_pdf(file_path)
+            # PDF: используем кэшированный DataFrame если есть, иначе читаем заново
+            if cached_df is not None:
+                df = cached_df
+            else:
+                df = process_pdf(file_path)
+                meta['cached_df'] = df  # Кэшируем для следующих запросов
             start_idx = (page - 1) * page_size
             df_page = df.iloc[start_idx:start_idx + page_size]
         else:
@@ -789,6 +845,9 @@ def get_upload_page() -> Response:
         # Нормализуем записи (используем общую функцию)
         records = [normalize_record(record) for record in records]
 
+        # Обновляем инкрементальный анализ
+        basic_analysis = incremental_analysis.update_analysis(dataset_id, df_page)
+
         return jsonify({
             'table_data': records,
             'columns': columns,
@@ -796,7 +855,8 @@ def get_upload_page() -> Response:
             'current_page': page,
             'page_size': page_size,
             'total_pages': total_pages,
-            'dataset_id': dataset_id
+            'dataset_id': dataset_id,
+            'basic_analysis': basic_analysis  # Возвращаем обновленный анализ
         })
     except ValidationError as e:
         raise e
@@ -808,10 +868,13 @@ def _cleanup_old_datasets() -> None:
     """
     Удаляет старые датасеты из _datasets и их директории.
     Использует TEMP_CLEANUP_AGE_MIN из конфигурации для определения возраста.
+    Также очищает инкрементальный анализ для удаляемых датасетов.
     """
     now = time.time()
     age_sec = Config.TEMP_CLEANUP_AGE_MIN * 60
     to_remove = []
+    incremental_analysis = get_incremental_analysis()
+    
     for dataset_id, meta in _datasets.items():
         if now - meta.get('created_at', 0) > age_sec:
             to_remove.append(dataset_id)
@@ -823,6 +886,9 @@ def _cleanup_old_datasets() -> None:
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 except Exception as e:
                     logger.warning(f"Failed to remove temp dir {temp_dir}: {e}")
+            # Очищаем инкрементальный анализ
+            incremental_analysis.clear_analysis(dataset_id)
+    
     for dataset_id in to_remove:
         _datasets.pop(dataset_id, None)
 
@@ -837,4 +903,13 @@ def _cleanup_before_request() -> None:
         _cleanup_old_datasets()
 
 if __name__ == '__main__':
+    # Логируем информацию о запуске
+    logger.info("Starting VCb03 Backend API", extra={
+        'extra_fields': {
+            'test_mode': Config.TEST_MODE,
+            'log_level': Config.LOG_LEVEL,
+            'json_logging': Config.LOG_JSON_FORMAT,
+            'api_key_set': bool(Config.API_KEY)
+        }
+    })
     app.run(host='0.0.0.0', port=5000, debug=Config.get_debug_flag())

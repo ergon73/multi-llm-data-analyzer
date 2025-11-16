@@ -50,6 +50,11 @@ class Config:
     # Temp files cleanup (minutes)
     TEMP_CLEANUP_AGE_MIN: int = int(os.getenv("TEMP_CLEANUP_AGE_MIN", "30"))
     
+    # Logging
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_JSON_FORMAT: bool = _get_bool("LOG_JSON_FORMAT", "false")
+    LOG_FILE: Optional[str] = os.getenv("LOG_FILE")
+    
     @classmethod
     def validate(cls) -> None:
         """

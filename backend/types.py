@@ -76,6 +76,7 @@ class UploadPageResponse(TypedDict):
     page_size: int
     total_pages: int
     dataset_id: str
+    basic_analysis: BasicAnalysis
 
 
 class TestResponse(TypedDict):
