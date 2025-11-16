@@ -58,3 +58,6 @@ coverage.xml
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Docker override для локальной разработки
+docker-compose.override.yml

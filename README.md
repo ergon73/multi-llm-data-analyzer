@@ -143,24 +143,62 @@ cd frontend && npm start
 ### Требования
 - Docker и Docker Compose
 
-### Команды
+### Локальная разработка (dev режим)
+
 ```bash
 # Сборка и запуск (backend на :5000, frontend на :3000)
 docker compose up --build
 
-# Переменные окружения (опционально)
-# в текущей оболочке перед запуском:
-# TEST_MODE=true               # демо-режим без реальных ключей
-# API_KEY=your_api_key         # включить простую API-авторизацию (заголовок X-API-Key)
-# RATE_LIMIT_WINDOW_SEC=60     # окно для лимита
-# RATE_LIMIT_MAX_REQ=60        # максимум запросов в окне
+# С опциональным override для разработки (hot-reload)
+# Создайте docker-compose.override.yml на основе docker-compose.override.yml.example
+cp docker-compose.override.yml.example docker-compose.override.yml
+# Отредактируйте под свои нужды
+docker compose up --build
 ```
+
+### Production развертывание
+
+```bash
+# Создайте .env.prod файл с production переменными
+cp env.example .env.prod
+# Отредактируйте .env.prod (обязательно установите TEST_MODE=false и API_KEY)
+
+# Запуск production конфигурации
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+
+# Просмотр логов
+docker compose -f docker-compose.prod.yml logs -f
+
+# Проверка статуса healthcheck
+docker compose -f docker-compose.prod.yml ps
+```
+
+### Переменные окружения
+
+**Для dev режима (docker-compose.yml):**
+```bash
+TEST_MODE=true               # демо-режим без реальных ключей
+API_KEY=your_api_key         # включить простую API-авторизацию (заголовок X-API-Key)
+RATE_LIMIT_WINDOW_SEC=60     # окно для лимита
+RATE_LIMIT_MAX_REQ=60       # максимум запросов в окне
+```
+
+**Для production (docker-compose.prod.yml):**
+См. раздел "Конфигурация" ниже и `docs/DEPLOYMENT.md` для полного списка переменных.
 
 ### Доступ
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:5000/api/*`
 
 Если задан `API_KEY`, все запросы к `/api/*` должны содержать заголовок `X-API-Key: <ваш_ключ>`.
+
+### Healthchecks
+
+Docker контейнеры имеют встроенные healthchecks:
+- **Backend**: проверяет `/api/test` endpoint каждые 30 секунд
+- **Frontend**: проверяет доступность nginx каждые 30 секунд
+
+Frontend ждет готовности backend перед запуском (`depends_on` с `condition: service_healthy`).
 
 ## Конфигурация
 

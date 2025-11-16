@@ -1,0 +1,25 @@
+# Пример файла docker-compose.override.yml для локальной разработки
+# Скопируйте этот файл в docker-compose.override.yml и настройте под свои нужды
+# docker-compose.override.yml автоматически используется docker-compose и игнорируется git
+
+version: '3.8'
+
+services:
+  backend:
+    # Монтирование кода для hot-reload (если используется Flask с debug)
+    volumes:
+      - ./backend:/app/backend
+    environment:
+      FLASK_DEBUG: "1"  # Включить debug режим для разработки
+      TEST_MODE: "true"
+    # Переопределение команды для разработки с автоперезагрузкой
+    # command: python -m flask run --host=0.0.0.0 --port=5000 --reload
+
+  frontend:
+    # Монтирование кода для hot-reload
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules  # Исключить node_modules из монтирования
+    # Использование dev сервера вместо production build
+    # command: npm start
+

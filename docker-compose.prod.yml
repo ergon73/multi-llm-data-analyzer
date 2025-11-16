@@ -1,0 +1,85 @@
+# Production Docker Compose конфигурация
+# Использование: docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      TEST_MODE: "false"
+      FLASK_DEBUG: "0"
+      API_KEY: "${API_KEY}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      YANDEX_FOLDER_ID: "${YANDEX_FOLDER_ID:-}"
+      YANDEX_API_KEY: "${YANDEX_API_KEY:-}"
+      GIGACHAT_CREDENTIALS: "${GIGACHAT_CREDENTIALS:-}"
+      GIGACHAT_CERT_PATH: "${GIGACHAT_CERT_PATH:-russian_trusted_root_ca.cer}"
+      GIGACHAT_VERIFY_SSL_CERTS: "${GIGACHAT_VERIFY_SSL_CERTS:-true}"
+      RATE_LIMIT_WINDOW_SEC: "${RATE_LIMIT_WINDOW_SEC:-60}"
+      RATE_LIMIT_MAX_REQ: "${RATE_LIMIT_MAX_REQ:-100}"
+      ANALYSIS_CACHE_TTL_SEC: "${ANALYSIS_CACHE_TTL_SEC:-3600}"
+      ANALYSIS_CACHE_MAX: "${ANALYSIS_CACHE_MAX:-512}"
+      TEMP_CLEANUP_AGE_MIN: "${TEMP_CLEANUP_AGE_MIN:-60}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/test"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Ограничение ресурсов для production
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - vcb03-network
+    # Логирование
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_API_URL: "${REACT_APP_API_URL:-https://your-domain.com/api}"
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # Ограничение ресурсов
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    networks:
+      - vcb03-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  vcb03-network:
+    driver: bridge
+
