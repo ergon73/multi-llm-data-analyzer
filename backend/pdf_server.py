@@ -8,6 +8,7 @@ import os
 import json
 from typing import List, Optional
 from dotenv import load_dotenv
+from pathlib import Path
 from flask_cors import CORS
 import logging
 from werkzeug.utils import secure_filename
@@ -16,8 +17,9 @@ from werkzeug.utils import secure_filename
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Загружаем переменные окружения как можно раньше, до импорта LLM
-load_dotenv()
+# Загружаем переменные окружения как можно раньше, из КОРНЯ проекта (единый .env)
+_root_env_path = Path(__file__).resolve().parents[1] / '.env'
+load_dotenv(dotenv_path=_root_env_path)
 
 # Импортируем LLM-обработчик после загрузки .env, чтобы учитывался TEST_MODE и ключи
 from llm.main_processor import get_analysis
