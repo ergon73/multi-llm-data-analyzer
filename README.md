@@ -70,6 +70,16 @@
 
 ### Пагинация и подгрузка данных
 - Для больших файлов реализована кнопка «Показать ещё», позволяющая подгружать данные порциями.
+- Backend хранит загруженный файл и возвращает `dataset_id` в ответе `POST /api/upload`.
+- Для догрузки последующих страниц используется `POST /api/upload/page` с телом:
+  ```json
+  {
+    "dataset_id": "<из ответа /api/upload>",
+    "page": 2,
+    "page_size": 1000
+  }
+  ```
+- Сервер выбирает страницу для CSV без полного чтения файла (optimized skiprows + nrows).
 
 ### Устойчивость и UX
 - Интерфейс устойчив к ошибкам (undefined/null), все действия сопровождаются пояснениями.
@@ -169,6 +179,25 @@ GIGACHAT_CERT_PATH=russian_trusted_root_ca.cer
 
 # Тестовый режим (без API-ключей)
 TEST_MODE=true
+
+# Кэш анализа (секунды/лимит)
+ANALYSIS_CACHE_TTL_SEC=600
+ANALYSIS_CACHE_MAX=256
+
+# Простая авторизация и rate limiting
+API_KEY=your_api_key
+RATE_LIMIT_WINDOW_SEC=60
+RATE_LIMIT_MAX_REQ=60
+```
+
+### Переменные окружения (Frontend)
+Добавьте в `frontend/.env`:
+```bash
+# Базовый URL backend API
+REACT_APP_API_URL=http://localhost:5000
+
+# Включить подробные логи в консоли браузера (dev)
+REACT_APP_DEBUG=true
 ```
 
 ### Тестовый режим

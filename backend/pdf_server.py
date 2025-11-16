@@ -17,6 +17,8 @@ from bleach.sanitizer import Cleaner
 from backend.errors import register_error_handlers, ValidationError
 import time
 import hashlib
+from itertools import islice
+from typing import Dict, Tuple, Any
 
 # Настраиваем логирование
 logging.basicConfig(level=logging.DEBUG)
@@ -129,6 +131,57 @@ def _put_cached_analysis(key: str, value: str) -> None:
         _analysis_cache.pop(oldest_key, None)
     _analysis_cache[key] = (time.time(), value)
 
+
+# Простое хранилище загруженных датасетов (только для lifetime процесса)
+# dataset_id -> {'path': str, 'kind': 'csv'|'excel'|'pdf', 'columns': list[str], 'total_rows': int}
+_datasets: Dict[str, Dict[str, Any]] = {}
+
+def _make_dataset_id(file_path: str) -> str:
+    try:
+        st = os.stat(file_path)
+        payload = f"{file_path}:{st.st_size}:{st.st_mtime_ns}".encode("utf-8")
+    except Exception:
+        payload = f"{file_path}:{time.time()}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+def _csv_count_rows_fast(file_path: str) -> int:
+    # Подсчёт строк без декодирования (быстро для больших файлов). Вычитаем заголовок.
+    try:
+        with open(file_path, "rb") as f:
+            total_lines = sum(1 for _ in f)
+        return max(total_lines - 1, 0)
+    except Exception:
+        # Фоллбек: читаем через pandas
+        try:
+            return int(pd.read_csv(file_path, usecols=[0]).shape[0])
+        except Exception:
+            return 0
+
+def _csv_get_page(file_path: str, page: int, page_size: int) -> Tuple[pd.DataFrame, list[str]]:
+    """Возвращает конкретную страницу CSV, не читая весь файл."""
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 1000
+    # Быстрый путь для больших страниц: используем skiprows + nrows
+    start_row = (page - 1) * page_size
+    try:
+        # читаем только заголовки
+        header_cols = pd.read_csv(file_path, nrows=0).columns.tolist()
+        if start_row == 0:
+            df = pd.read_csv(file_path, nrows=page_size)
+        else:
+            # skiprows: пропускаем строки [1..start_row] (0 — заголовок)
+            df = pd.read_csv(file_path, skiprows=range(1, start_row + 1), nrows=page_size, header=0)
+            df.columns = header_cols  # восстанавливаем имена колонок
+        return df, header_cols
+    except Exception:
+        # Фоллбек на итератор chunksize
+        chunk_iter = pd.read_csv(file_path, chunksize=page_size, iterator=True)
+        chunk = next(islice(chunk_iter, page - 1, page), None)
+        if chunk is None:
+            return pd.DataFrame(), []
+        return chunk, chunk.columns.tolist()
 
 def perform_basic_analysis(df: pd.DataFrame) -> BasicAnalysis:
     """Выполняет базовый анализ данных DataFrame."""
@@ -276,34 +329,44 @@ def upload_file():
         # Определяем тип файла и обрабатываем соответственно
         file_extension = file.filename.lower()
         
+        dataset_id = _make_dataset_id(temp_file_name)
+
         if file_extension.endswith('.csv'):
-            try:
-                file_size = os.path.getsize(temp_file_name)
-            except Exception:
-                file_size = 0
-            # Для CSV используем оптимизированную обработку больших файлов
-            df = process_large_csv(temp_file_name, file_size)
+            # CSV: считаем общее число строк быстро и читаем только нужную страницу
+            total_rows = _csv_count_rows_fast(temp_file_name)
+            df_page, columns = _csv_get_page(temp_file_name, page, page_size)
+            if not columns:
+                # попытка прочитать хотя бы заголовок
+                try:
+                    columns = pd.read_csv(temp_file_name, nrows=0).columns.tolist()
+                except Exception:
+                    columns = []
+            df_for_analysis = df_page  # быстрый анализ по текущей странице
+            kind = 'csv'
         elif file_extension.endswith(('.xlsx', '.xls')):
             df = process_excel(temp_file_name)
+            total_rows = len(df)
+            df_page = df.iloc[(page - 1) * page_size: (page - 1) * page_size + page_size]
+            columns = df.columns.tolist()
+            df_for_analysis = df
+            kind = 'excel'
         elif file_extension.endswith('.pdf'):
             df = process_pdf(temp_file_name)
+            total_rows = len(df)
+            df_page = df.iloc[(page - 1) * page_size: (page - 1) * page_size + page_size]
+            columns = df.columns.tolist()
+            df_for_analysis = df
+            kind = 'pdf'
         else:
             raise ValidationError("Unsupported file format")
             
-        if df.empty:
+        if df_page.empty and (file_extension.endswith('.csv') is False) and (total_rows == 0):
             raise ValidationError("Не удалось извлечь данные из файла")
         
-        # Вычисляем общее количество строк
-        total_rows = len(df)
         total_pages = (total_rows + page_size - 1) // page_size
         
         logger.debug(f"Total rows: {total_rows}, Total pages: {total_pages}")
         logger.debug(f"Page: {page}, Page size: {page_size}")
-        
-        # Применяем пагинацию
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        df_page = df.iloc[start_idx:end_idx]
         
         # Преобразуем DataFrame в список словарей
         records = df_page.to_dict('records')
@@ -329,18 +392,27 @@ def upload_file():
                     else:
                         record[field] = None
 
-        # Выполняем базовый анализ для всех данных
-        basic_analysis = perform_basic_analysis(df)
+        # Выполняем базовый анализ (для CSV — по текущей странице как укороченный вариант)
+        basic_analysis = perform_basic_analysis(df_for_analysis if not df_for_analysis.empty else df_page)
+
+        # Сохраняем метаданные датасета для последующих запросов страниц
+        _datasets[dataset_id] = {
+            'path': temp_file_name,
+            'kind': kind,
+            'columns': columns,
+            'total_rows': total_rows,
+        }
 
         # Формируем ответ
         response = {
             'table_data': records,
-            'columns': df.columns.tolist(),
+            'columns': columns,
             'total_rows': total_rows,
             'current_page': page,
             'page_size': page_size,
             'total_pages': total_pages,
-            'basic_analysis': basic_analysis
+            'basic_analysis': basic_analysis,
+            'dataset_id': dataset_id
         }
 
         logger.debug(f"Sending response with {len(records)} records")
@@ -356,11 +428,9 @@ def upload_file():
         raise
         
     finally:
-        if temp_file_name and os.path.exists(temp_file_name):
-            try:
-                os.remove(temp_file_name)
-            except Exception as e:
-                logger.error(f"Error removing temp file: {str(e)}")
+        # Не удаляем файл сразу: он нужен для последующих страниц.
+        # Файл будет удалён при завершении процесса или вручную.
+        pass
 
 @app.route('/api/analyze', methods=['POST'])
 def analyze():
@@ -478,6 +548,74 @@ def fill_missing_ai():
         raise e
     except Exception as e:
         logger.exception('Error in fill-missing-ai')
+        raise
+
+@app.route('/api/upload/page', methods=['POST'])
+def get_upload_page():
+    """Возвращает страницу данных по dataset_id без повторной загрузки файла."""
+    try:
+        data = request.get_json() or {}
+        dataset_id = data.get('dataset_id')
+        page = int(data.get('page', 1))
+        page_size = int(data.get('page_size', 1000))
+        if not dataset_id or dataset_id not in _datasets:
+            raise ValidationError("Invalid or missing dataset_id")
+        meta = _datasets[dataset_id]
+        file_path = meta['path']
+        kind = meta['kind']
+        columns = meta['columns']
+        total_rows = int(meta['total_rows'])
+        total_pages = (total_rows + page_size - 1) // page_size if total_rows > 0 else 1
+
+        if kind == 'csv':
+            df_page, _ = _csv_get_page(file_path, page, page_size)
+            if not columns:
+                columns = df_page.columns.tolist()
+        elif kind == 'excel':
+            df = process_excel(file_path)
+            start_idx = (page - 1) * page_size
+            df_page = df.iloc[start_idx:start_idx + page_size]
+        elif kind == 'pdf':
+            df = process_pdf(file_path)
+            start_idx = (page - 1) * page_size
+            df_page = df.iloc[start_idx:start_idx + page_size]
+        else:
+            raise ValidationError("Unsupported dataset kind")
+
+        records = df_page.to_dict('records')
+
+        # Нормализуем NaN как в upload_file
+        required_fields = ['year', 'make', 'model', 'trim', 'body', 'transmission', 'vin', 'state', 'condition', 'odometer', 'color', 'interior', 'seller', 'mmr', 'sellingprice', 'saledate']
+        for record in records:
+            for field in required_fields:
+                if field not in record or pd.isna(record[field]):
+                    if field == 'condition':
+                        record[field] = 0.0
+                    elif field in ['year', 'odometer', 'mmr', 'sellingprice']:
+                        record[field] = 0
+                    else:
+                        record[field] = None
+                elif pd.isna(record[field]):
+                    if field == 'condition':
+                        record[field] = 0.0
+                    elif field in ['year', 'odometer', 'mmr', 'sellingprice']:
+                        record[field] = 0
+                    else:
+                        record[field] = None
+
+        return jsonify({
+            'table_data': records,
+            'columns': columns,
+            'total_rows': total_rows,
+            'current_page': page,
+            'page_size': page_size,
+            'total_pages': total_pages,
+            'dataset_id': dataset_id
+        })
+    except ValidationError as e:
+        raise e
+    except Exception:
+        logger.exception("Error in /api/upload/page")
         raise
 
 if __name__ == '__main__':
