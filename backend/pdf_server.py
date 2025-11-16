@@ -13,6 +13,7 @@ from flask_cors import CORS
 import logging
 from werkzeug.utils import secure_filename
 from bleach.sanitizer import Cleaner
+from backend.errors import register_error_handlers, ValidationError
 
 # Настраиваем логирование
 logging.basicConfig(level=logging.DEBUG)
@@ -26,6 +27,7 @@ load_dotenv(dotenv_path=_root_env_path)
 from llm.main_processor import get_analysis
 
 app = Flask(__name__)
+register_error_handlers(app)
 
 # Настраиваем максимальный размер файла (100 МБ)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB
@@ -183,19 +185,19 @@ def upload_file():
     temp_file_name = None
     try:
         if 'file' not in request.files:
-            return jsonify({'error': 'No file part'}), 400
+            raise ValidationError("No file part")
         
         file = request.files['file']
         if file.filename == '':
-            return jsonify({'error': 'No selected file'}), 400
+            raise ValidationError("No selected file")
 
         # Проверяем расширение файла
         if not file.filename:
-            return jsonify({'error': 'No file selected'}), 400
+            raise ValidationError("No file selected")
             
         file_extension = file.filename.lower()
         if not (file_extension.endswith('.csv') or file_extension.endswith('.xlsx') or file_extension.endswith('.xls') or file_extension.endswith('.pdf')):
-            return jsonify({'error': 'Only CSV, Excel, and PDF files are allowed'}), 400
+            raise ValidationError("Only CSV, Excel, and PDF files are allowed")
 
         # Получаем параметры пагинации
         page = request.args.get('page', 1, type=int)
@@ -219,10 +221,10 @@ def upload_file():
         elif file_extension.endswith('.pdf'):
             df = process_pdf(temp_file_name)
         else:
-            return jsonify({'error': 'Unsupported file format'}), 400
+            raise ValidationError("Unsupported file format")
             
         if df.empty:
-            return jsonify({'error': 'Не удалось извлечь данные из файла'}), 400
+            raise ValidationError("Не удалось извлечь данные из файла")
         
         # Вычисляем общее количество строк
         total_rows = len(df)
@@ -279,9 +281,12 @@ def upload_file():
         
         return jsonify(response)
 
+    except ValidationError as e:
+        raise e
     except Exception as e:
-        logger.error(f"Error processing file: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.exception("Error processing file")
+        # централизованный обработчик вернет 500 без детали
+        raise
         
     finally:
         if temp_file_name and os.path.exists(temp_file_name):
@@ -295,7 +300,7 @@ def analyze():
     try:
         data = request.get_json()
         if not data or 'provider' not in data or 'model' not in data or 'table_data' not in data:
-            return jsonify({'error': 'Missing required fields'}), 400
+            raise ValidationError("Missing required fields")
         
         provider = data['provider']
         model = data['model']
@@ -319,22 +324,24 @@ def analyze():
             'timestamp': pd.Timestamp.now().isoformat()
         })
 
+    except ValidationError as e:
+        raise e
     except Exception as e:
         logger.exception("Error during analysis")
-        return jsonify({'error': str(e)}), 500
+        raise
 
 @app.route('/api/report', methods=['POST'])
 def generate_report():
     try:
         data = request.get_json()
         if not data or 'report_html' not in data:
-            return jsonify({'error': 'Missing report HTML'}), 400
+            raise ValidationError("Missing report HTML")
 
         raw_html: str = data['report_html']
 
         # Проверяем размер
         if isinstance(raw_html, str) and len(raw_html.encode('utf-8')) > MAX_REPORT_HTML_BYTES:
-            return jsonify({'error': 'Report HTML is too large'}), 400
+            raise ValidationError("Report HTML is too large")
 
         # Санитайз HTML
         safe_html = _html_cleaner.clean(raw_html)
@@ -354,16 +361,18 @@ def generate_report():
         else:
             return jsonify({'error': 'Failed to generate PDF'}), 500
 
+    except ValidationError as e:
+        raise e
     except Exception as e:
         logger.exception("Error generating report")
-        return jsonify({'error': str(e)}), 500
+        raise
 
 @app.route('/api/fill-missing-ai', methods=['POST'])
 def fill_missing_ai():
     try:
         data = request.get_json()
         if not data or 'table_data' not in data or 'columns' not in data or 'missing_info' not in data:
-            return jsonify({'error': 'Missing required fields'}), 400
+            raise ValidationError("Missing required fields")
         table_data = data['table_data']
         columns = data['columns']
         missing_info = data['missing_info']
@@ -389,9 +398,12 @@ def fill_missing_ai():
                     recs.append({'row_idx': int(idx), 'suggested': value, 'confidence': 0.5, 'explanation': explanation})
             recommendations[col] = recs
         return jsonify({'recommendations': recommendations})
+    except ValidationError as e:
+        raise e
     except Exception as e:
         logger.exception('Error in fill-missing-ai')
-        return jsonify({'error': str(e)}), 500
+        raise
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    debug_flag = os.getenv('FLASK_DEBUG', '0') in ('1', 'true', 'True')
+    app.run(host='0.0.0.0', port=5000, debug=debug_flag)
