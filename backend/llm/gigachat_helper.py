@@ -18,23 +18,30 @@ def get_giga_response(user_prompt: str, model: str = "GigaChat:latest") -> str:
 
     try:
         credentials = Config.GIGACHAT_CREDENTIALS
-        cert_path = Config.GIGACHAT_CERT_PATH or "russian_trusted_root_ca.cer"
+        verify_ssl = Config.GIGACHAT_VERIFY_SSL_CERTS
 
         if not credentials:
             logger.error("Не найдены учетные данные GigaChat в переменных окружения")
             return "Не удалось получить ответ от GigaChat: отсутствуют учетные данные"
 
-        # Проверяем наличие сертификата
-        if not os.path.exists(cert_path):
-            logger.warning(f"Сертификат {cert_path} не найден")
-            return "Не удалось получить ответ от GigaChat: отсутствует сертификат"
+        # Формируем параметры для GigaChat
+        giga_kwargs = {
+            "credentials": credentials,
+            "verify_ssl_certs": verify_ssl
+        }
+
+        # Проверяем наличие сертификата только если проверка SSL включена
+        if verify_ssl:
+            cert_path = Config.GIGACHAT_CERT_PATH or "russian_trusted_root_ca.cer"
+            if not os.path.exists(cert_path):
+                logger.warning(f"Сертификат {cert_path} не найден")
+                return "Не удалось получить ответ от GigaChat: отсутствует сертификат"
+            giga_kwargs["ca_bundle_file"] = cert_path
+        else:
+            logger.warning("SSL-валидация для GigaChat отключена (GIGACHAT_VERIFY_SSL_CERTS=false). Это небезопасно!")
         
         # Создаем клиент GigaChat
-        giga = GigaChat(
-            credentials=credentials,
-            ca_bundle_file=cert_path,
-            verify_ssl_certs=True
-        )
+        giga = GigaChat(**giga_kwargs)
         
         # Создаем структуру сообщения для API
         messages = [

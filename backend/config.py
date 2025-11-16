@@ -12,6 +12,15 @@ _root_env_path = Path(__file__).resolve().parents[1] / '.env'
 load_dotenv(dotenv_path=_root_env_path)
 
 
+def _get_bool(key: str, default: str = "false") -> bool:
+    """
+    Преобразует строковое значение переменной окружения в булево.
+    "false", "0", "no" (case-insensitive) → False, иначе True.
+    """
+    value = os.getenv(key, default).lower()
+    return value not in ("false", "0", "no")
+
+
 class Config:
     """Централизованный класс конфигурации."""
     
@@ -21,6 +30,7 @@ class Config:
     YANDEX_API_KEY: Optional[str] = os.getenv("YANDEX_API_KEY")
     GIGACHAT_CREDENTIALS: Optional[str] = os.getenv("GIGACHAT_CREDENTIALS")
     GIGACHAT_CERT_PATH: Optional[str] = os.getenv("GIGACHAT_CERT_PATH")
+    GIGACHAT_VERIFY_SSL_CERTS: bool = _get_bool("GIGACHAT_VERIFY_SSL_CERTS", "true")
     
     # Security & Rate Limiting
     API_KEY: Optional[str] = os.getenv("API_KEY")  # опционально, если не задан - проверка отключена

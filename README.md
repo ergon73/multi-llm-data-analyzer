@@ -176,6 +176,7 @@ YANDEX_API_KEY=your_yandex_key_here
 # GigaChat
 GIGACHAT_CREDENTIALS=your_gigachat_credentials
 GIGACHAT_CERT_PATH=russian_trusted_root_ca.cer
+GIGACHAT_VERIFY_SSL_CERTS=true  # false позволяет работать без корневого сертификата (на свой риск)
 
 # Тестовый режим (без API-ключей)
 TEST_MODE=true
@@ -205,6 +206,11 @@ REACT_APP_DEBUG=true
 - LLM возвращают шаблонные ответы
 - Все функции работают, но без реального анализа
 - Полезно для тестирования интерфейса
+
+### Настройка GigaChat и SSL-сертификаты
+По умолчанию для работы с GigaChat требуется корневой сертификат `russian_trusted_root_ca.cer`. Если у вас нет установленного корневого сертификата, вы можете отключить проверку SSL-сертификатов, установив `GIGACHAT_VERIFY_SSL_CERTS=false` в `.env`.
+
+**⚠️ ВАЖНО: Отключение проверки SSL-сертификатов небезопасно!** При `GIGACHAT_VERIFY_SSL_CERTS=false` приложение не будет проверять подлинность сертификата сервера GigaChat, что делает соединение уязвимым для атак "человек посередине" (MITM). Используйте этот параметр только в тестовых окружениях или если вы полностью понимаете связанные риски безопасности. В production всегда используйте `GIGACHAT_VERIFY_SSL_CERTS=true` с корректным файлом сертификата.
 
 ## Тестирование и типизация
 
