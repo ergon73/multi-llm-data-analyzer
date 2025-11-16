@@ -128,6 +128,30 @@ cd frontend && npm start
 ### Открытие приложения
 Перейдите на [http://localhost:3000](http://localhost:3000)
 
+## Запуск через Docker
+
+### Требования
+- Docker и Docker Compose
+
+### Команды
+```bash
+# Сборка и запуск (backend на :5000, frontend на :3000)
+docker compose up --build
+
+# Переменные окружения (опционально)
+# в текущей оболочке перед запуском:
+# TEST_MODE=true               # демо-режим без реальных ключей
+# API_KEY=your_api_key         # включить простую API-авторизацию (заголовок X-API-Key)
+# RATE_LIMIT_WINDOW_SEC=60     # окно для лимита
+# RATE_LIMIT_MAX_REQ=60        # максимум запросов в окне
+```
+
+### Доступ
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:5000/api/*`
+
+Если задан `API_KEY`, все запросы к `/api/*` должны содержать заголовок `X-API-Key: <ваш_ключ>`.
+
 ## Конфигурация
 
 ### Переменные окружения (.env)
