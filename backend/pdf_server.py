@@ -12,6 +12,7 @@ from pathlib import Path
 from flask_cors import CORS
 import logging
 from werkzeug.utils import secure_filename
+from backend.types import BasicAnalysis
 from bleach.sanitizer import Cleaner
 from backend.errors import register_error_handlers, ValidationError
 
@@ -68,12 +69,12 @@ CORS(app, resources={
     }
 })
 
-def perform_basic_analysis(df: pd.DataFrame) -> dict:
+def perform_basic_analysis(df: pd.DataFrame) -> BasicAnalysis:
     """Выполняет базовый анализ данных DataFrame."""
     logger.debug(f"Starting basic analysis. DataFrame shape: {df.shape}")
     logger.debug(f"DataFrame columns: {df.columns.tolist()}")
     
-    analysis = {
+    analysis: BasicAnalysis = {
         'numeric_columns': {},
         'string_columns': {}
     }

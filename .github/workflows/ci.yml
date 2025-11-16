@@ -55,4 +55,9 @@ jobs:
           pip install pytest
           pytest -q
 
+      - name: Type-check backend (mypy)
+        run: |
+          pip install mypy
+          mypy backend
+
 
