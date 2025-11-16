@@ -8,6 +8,7 @@ gigachat
 openai
 # Для генерации PDF
 WeasyPrint
+bleach
 # Для работы с файлами данных
 pandas
 pdfplumber

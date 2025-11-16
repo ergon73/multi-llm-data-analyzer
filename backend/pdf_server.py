@@ -12,6 +12,7 @@ from pathlib import Path
 from flask_cors import CORS
 import logging
 from werkzeug.utils import secure_filename
+from bleach.sanitizer import Cleaner
 
 # Настраиваем логирование
 logging.basicConfig(level=logging.DEBUG)
@@ -28,6 +29,33 @@ app = Flask(__name__)
 
 # Настраиваем максимальный размер файла (100 МБ)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB
+
+# Ограничение на размер HTML отчёта (байт)
+MAX_REPORT_HTML_BYTES = 200_000
+
+# Санитайзер HTML (белый список тегов/атрибутов)
+_html_cleaner = Cleaner(
+    tags=[
+        'p', 'b', 'strong', 'i', 'em', 'u',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'ul', 'ol', 'li',
+        'table', 'thead', 'tbody', 'tr', 'th', 'td',
+        'blockquote', 'code', 'pre', 'span', 'div', 'br', 'hr'
+    ],
+    attributes={
+        '*': ['style'],
+        'table': ['border', 'cellpadding', 'cellspacing'],
+        'th': ['colspan', 'rowspan', 'align'],
+        'td': ['colspan', 'rowspan', 'align'],
+        'span': ['class'],
+        'div': ['class']
+    },
+    strip=True
+)
+
+# Блокируем любые внешние обращения (URL) при генерации PDF
+def _block_external_url_fetcher(url):
+    raise ValueError("External references are disabled in PDF generation")
 
 # Настраиваем CORS более специфично
 CORS(app, resources={
@@ -302,8 +330,17 @@ def generate_report():
         if not data or 'report_html' not in data:
             return jsonify({'error': 'Missing report HTML'}), 400
 
-        # Создаем PDF из HTML
-        html = HTML(string=data['report_html'])
+        raw_html: str = data['report_html']
+
+        # Проверяем размер
+        if isinstance(raw_html, str) and len(raw_html.encode('utf-8')) > MAX_REPORT_HTML_BYTES:
+            return jsonify({'error': 'Report HTML is too large'}), 400
+
+        # Санитайз HTML
+        safe_html = _html_cleaner.clean(raw_html)
+
+        # Создаем PDF из очищенного HTML, без доступа к внешним ресурсам
+        html = HTML(string=safe_html, base_url=None, url_fetcher=_block_external_url_fetcher)
         pdf = html.write_pdf()
 
         # Отправляем PDF
