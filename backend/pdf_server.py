@@ -215,7 +215,12 @@ def upload_file():
         file_extension = file.filename.lower()
         
         if file_extension.endswith('.csv'):
-            df = process_csv(temp_file_name)
+            try:
+                file_size = os.path.getsize(temp_file_name)
+            except Exception:
+                file_size = 0
+            # Для CSV используем оптимизированную обработку больших файлов
+            df = process_large_csv(temp_file_name, file_size)
         elif file_extension.endswith(('.xlsx', '.xls')):
             df = process_excel(temp_file_name)
         elif file_extension.endswith('.pdf'):
