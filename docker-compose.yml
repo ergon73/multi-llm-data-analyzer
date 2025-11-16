@@ -1,0 +1,22 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      TEST_MODE: "${TEST_MODE:-true}"
+      FLASK_DEBUG: "0"
+      API_KEY: "${API_KEY:-}"
+    ports:
+      - "5000:5000"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_API_URL: "http://backend:5000"
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+
