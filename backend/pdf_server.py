@@ -15,6 +15,7 @@ from werkzeug.utils import secure_filename
 from backend.types import BasicAnalysis
 from bleach.sanitizer import Cleaner
 from backend.errors import register_error_handlers, ValidationError
+import time
 
 # Настраиваем логирование
 logging.basicConfig(level=logging.DEBUG)
@@ -65,9 +66,38 @@ CORS(app, resources={
     r"/api/*": {
         "origins": ["http://localhost:3000"],
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
+        "allow_headers": ["Content-Type", "X-API-Key"]
     }
 })
+
+# Опциональная API-авторизация и наивный rate limiting
+API_KEY = os.getenv("API_KEY")  # если не задан, проверка отключена
+RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "60"))
+RATE_LIMIT_MAX_REQ = int(os.getenv("RATE_LIMIT_MAX_REQ", "60"))
+_rate_limit_store: dict[str, list[float]] = {}
+
+def _client_id() -> str:
+    return request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
+
+@app.before_request
+def _security_and_rate_limit():
+    if not request.path.startswith("/api/"):
+        return
+    if API_KEY:
+        provided = request.headers.get("X-API-Key")
+        if provided != API_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
+    now = time.time()
+    cid = _client_id()
+    bucket = _rate_limit_store.get(cid, [])
+    cutoff = now - RATE_LIMIT_WINDOW_SEC
+    bucket = [ts for ts in bucket if ts > cutoff]
+    if len(bucket) >= RATE_LIMIT_MAX_REQ:
+        retry_after = int(bucket[0] + RATE_LIMIT_WINDOW_SEC - now) + 1
+        return jsonify({"error": "Too Many Requests", "retry_after": retry_after}), 429
+    bucket.append(now)
+    _rate_limit_store[cid] = bucket
+
 
 def perform_basic_analysis(df: pd.DataFrame) -> BasicAnalysis:
     """Выполняет базовый анализ данных DataFrame."""
