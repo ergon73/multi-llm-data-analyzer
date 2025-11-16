@@ -20,3 +20,7 @@ python-docx  # для структурированного текста
 # Для тестирования
 pytest
 pytest-cov
+# Для форматирования и проверки кода
+black
+mypy
+types-requests

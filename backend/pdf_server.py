@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, Response
 from weasyprint import HTML, CSS
 from io import BytesIO
 import pandas as pd
@@ -6,19 +6,30 @@ import pdfplumber
 import tempfile
 import os
 import json
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple, Any, Union
 from pathlib import Path
 from flask_cors import CORS
 import logging
 from werkzeug.utils import secure_filename
-from backend.types import BasicAnalysis
+from backend.types import (
+    BasicAnalysis,
+    FileUploadResponse,
+    LLMAnalysisRequest,
+    LLMAnalysisResponse,
+    ReportRequest,
+    FillMissingRequest,
+    FillMissingResponse,
+    UploadPageRequest,
+    UploadPageResponse,
+    TestResponse
+)
+from backend.services import AnalysisCache, perform_basic_analysis
 from bleach.sanitizer import Cleaner
 from backend.errors import register_error_handlers, ValidationError
 from backend.config import Config
 import time
 import hashlib
 from itertools import islice
-from typing import Dict, Tuple, Any
 from collections import deque
 
 # Настраиваем логирование
@@ -58,7 +69,8 @@ _html_cleaner = Cleaner(
 )
 
 # Блокируем любые внешние обращения (URL) при генерации PDF
-def _block_external_url_fetcher(url):
+def _block_external_url_fetcher(url: str) -> None:
+    """Блокирует внешние URL при генерации PDF для безопасности."""
     raise ValueError("External references are disabled in PDF generation")
 
 # Настраиваем CORS более специфично
@@ -99,10 +111,13 @@ def _prune_bucket(bucket: deque[float], cutoff: float) -> None:
         bucket.popleft()
 
 @app.before_request
-def _security_and_rate_limit():
+def _security_and_rate_limit() -> Optional[Response]:
     """
     Проверяет авторизацию и применяет rate limiting для всех /api/ endpoints.
     В TEST_MODE без API_KEY выдает предупреждение, но не блокирует.
+    
+    Returns:
+        Response с ошибкой авторизации/rate limit или None если запрос разрешен
     """
     if not request.path.startswith("/api/"):
         return
@@ -138,34 +153,8 @@ def _security_and_rate_limit():
     _rate_limit_store[cid] = bucket
 
 
-# Кэш анализа по (provider, model, dataset_hash)
-ANALYSIS_CACHE_TTL_SEC = Config.ANALYSIS_CACHE_TTL_SEC
-ANALYSIS_CACHE_MAX = Config.ANALYSIS_CACHE_MAX
-_analysis_cache: dict[str, tuple[float, str]] = {}
-
-
-def _make_analysis_key(provider: str, model: str, table_string: str) -> str:
-    h = hashlib.sha256(table_string.encode("utf-8")).hexdigest()
-    return f"{provider}:{model}:{h}"
-
-
-def _get_cached_analysis(key: str) -> Optional[str]:
-    item = _analysis_cache.get(key)
-    if not item:
-        return None
-    ts, val = item
-    if time.time() - ts <= ANALYSIS_CACHE_TTL_SEC:
-        return val
-    _analysis_cache.pop(key, None)
-    return None
-
-
-def _put_cached_analysis(key: str, value: str) -> None:
-    if len(_analysis_cache) >= ANALYSIS_CACHE_MAX:
-        # удаляем самый старый элемент
-        oldest_key = min(_analysis_cache, key=lambda k: _analysis_cache[k][0])
-        _analysis_cache.pop(oldest_key, None)
-    _analysis_cache[key] = (time.time(), value)
+# Глобальный экземпляр кэша анализа
+_analysis_cache = AnalysisCache()
 
 
 def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -201,6 +190,15 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
 _datasets: Dict[str, Dict[str, Any]] = {}
 
 def _make_dataset_id(file_path: str) -> str:
+    """
+    Создает уникальный идентификатор датасета на основе пути, размера и времени модификации файла.
+    
+    Args:
+        file_path: Путь к файлу
+        
+    Returns:
+        16-символьный хеш идентификатор датасета
+    """
     try:
         st = os.stat(file_path)
         payload = f"{file_path}:{st.st_size}:{st.st_mtime_ns}".encode("utf-8")
@@ -209,7 +207,16 @@ def _make_dataset_id(file_path: str) -> str:
     return hashlib.sha256(payload).hexdigest()[:16]
 
 def _csv_count_rows_fast(file_path: str) -> int:
-    # Подсчёт строк без декодирования (быстро для больших файлов). Вычитаем заголовок.
+    """
+    Быстрый подсчёт строк в CSV файле без полного декодирования.
+    Вычитает заголовок из общего количества строк.
+    
+    Args:
+        file_path: Путь к CSV файлу
+        
+    Returns:
+        Количество строк данных (без заголовка)
+    """
     try:
         with open(file_path, "rb") as f:
             total_lines = sum(1 for _ in f)
@@ -221,8 +228,18 @@ def _csv_count_rows_fast(file_path: str) -> int:
         except Exception:
             return 0
 
-def _csv_get_page(file_path: str, page: int, page_size: int) -> Tuple[pd.DataFrame, list[str]]:
-    """Возвращает конкретную страницу CSV, не читая весь файл."""
+def _csv_get_page(file_path: str, page: int, page_size: int) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Возвращает конкретную страницу CSV, не читая весь файл.
+    
+    Args:
+        file_path: Путь к CSV файлу
+        page: Номер страницы (начинается с 1)
+        page_size: Размер страницы
+        
+    Returns:
+        Кортеж (DataFrame со страницей данных, список имен колонок)
+    """
     if page < 1:
         page = 1
     if page_size < 1:
@@ -247,51 +264,17 @@ def _csv_get_page(file_path: str, page: int, page_size: int) -> Tuple[pd.DataFra
             return pd.DataFrame(), []
         return chunk, chunk.columns.tolist()
 
-def perform_basic_analysis(df: pd.DataFrame) -> BasicAnalysis:
-    """Выполняет базовый анализ данных DataFrame."""
-    logger.debug(f"Starting basic analysis. DataFrame shape: {df.shape}")
-    logger.debug(f"DataFrame columns: {df.columns.tolist()}")
-    
-    analysis: BasicAnalysis = {
-        'numeric_columns': {},
-        'string_columns': {}
-    }
-    
-    for column in df.columns:
-        logger.debug(f"Analyzing column: {column}")
-        if pd.api.types.is_numeric_dtype(df[column]):
-            logger.debug(f"Column {column} is numeric")
-            # Обрабатываем NaN значения для числовых колонок
-            column_data = df[column].dropna()
-            if len(column_data) > 0:
-                analysis['numeric_columns'][column] = {
-                    'sum': float(column_data.sum()),
-                    'mean': float(column_data.mean()),
-                    'min': float(column_data.min()),
-                    'max': float(column_data.max())
-                }
-            else:
-                analysis['numeric_columns'][column] = {
-                    'sum': 0.0,
-                    'mean': 0.0,
-                    'min': 0.0,
-                    'max': 0.0
-                }
-            logger.debug(f"Numeric analysis for {column}: {analysis['numeric_columns'][column]}")
-        else:
-            logger.debug(f"Column {column} is string")
-            # Обрабатываем NaN значения для строковых колонок
-            unique_values = df[column].dropna().unique().tolist()[:10]
-            analysis['string_columns'][column] = {
-                'unique_values_count': int(df[column].nunique()),
-                'unique_values': unique_values
-            }
-            logger.debug(f"String analysis for {column}: {analysis['string_columns'][column]}")
-    
-    return analysis
 
 def process_pdf(file: str) -> pd.DataFrame:
-    """Извлекает таблицу из первой страницы PDF файла."""
+    """
+    Извлекает таблицу из первой страницы PDF файла.
+    
+    Args:
+        file: Путь к PDF файлу
+        
+    Returns:
+        DataFrame с извлеченными данными или пустой DataFrame если таблица не найдена
+    """
     with pdfplumber.open(file) as pdf:
         first_page = pdf.pages[0]
         tables = first_page.extract_tables()
@@ -304,11 +287,31 @@ def process_pdf(file: str) -> pd.DataFrame:
     return pd.DataFrame()  # Возвращаем пустой DataFrame если таблица не найдена
 
 def process_excel(file: str) -> pd.DataFrame:
-    """Извлекает данные из Excel файла."""
+    """
+    Извлекает данные из Excel файла.
+    
+    Args:
+        file: Путь к Excel файлу
+        
+    Returns:
+        DataFrame с данными из Excel
+    """
     return pd.read_excel(file)
 
 def process_csv(file: str, encoding: str = 'utf-8') -> pd.DataFrame:
-    """Извлекает данные из CSV файла."""
+    """
+    Извлекает данные из CSV файла с автоматическим определением кодировки.
+    
+    Args:
+        file: Путь к CSV файлу
+        encoding: Кодировка файла (по умолчанию utf-8)
+        
+    Returns:
+        DataFrame с данными из CSV
+        
+    Raises:
+        ValueError: Если не удалось определить кодировку файла
+    """
     logger.debug(f"Processing CSV file with encoding: {encoding}")
     try:
         df = pd.read_csv(file, encoding=encoding)
@@ -325,7 +328,20 @@ def process_csv(file: str, encoding: str = 'utf-8') -> pd.DataFrame:
             raise ValueError("Не удалось определить кодировку файла")
 
 def process_large_csv(file_path: str, file_size: int) -> pd.DataFrame:
-    """Обрабатывает большой CSV файл с ограничением по размеру."""
+    """
+    Обрабатывает большой CSV файл с ограничением по размеру.
+    Для файлов меньше 10 МБ читает полностью, для больших - только первые 1000 строк.
+    
+    Args:
+        file_path: Путь к CSV файлу
+        file_size: Размер файла в байтах
+        
+    Returns:
+        DataFrame с данными
+        
+    Raises:
+        ValueError: Если произошла ошибка при обработке файла
+    """
     logger.debug(f"Processing large CSV file: {file_path}, size: {file_size}")
     
     try:
@@ -343,15 +359,28 @@ def process_large_csv(file_path: str, file_size: int) -> pd.DataFrame:
         raise ValueError(f"Ошибка обработки CSV файла: {str(e)}")
 
 @app.errorhandler(413)
-def too_large(e):
-    """Обработчик ошибки превышения размера файла"""
+def too_large(e: Exception) -> Response:
+    """
+    Обработчик ошибки превышения размера файла (413 Request Entity Too Large).
+    
+    Args:
+        e: Исключение от Flask
+        
+    Returns:
+        JSON ответ с ошибкой и статусом 413
+    """
     return jsonify({
         'error': 'Файл слишком большой. Максимальный размер: 100 МБ'
     }), 413
 
 @app.route('/api/test', methods=['GET'])
-def test_endpoint():
-    """Простой тестовый endpoint"""
+def test_endpoint() -> Response:
+    """
+    Простой тестовый endpoint для проверки работоспособности сервера.
+    
+    Returns:
+        JSON ответ со статусом сервера
+    """
     return jsonify({
         'status': 'ok',
         'message': 'Сервер работает!',
@@ -360,7 +389,23 @@ def test_endpoint():
     })
 
 @app.route('/api/upload', methods=['POST'])
-def upload_file():
+def upload_file() -> Response:
+    """
+    Загружает файл (CSV, Excel, PDF) и возвращает первую страницу данных с анализом.
+    
+    Query параметры:
+        page: Номер страницы (по умолчанию 1)
+        page_size: Размер страницы (по умолчанию 1000, максимум 5000)
+        
+    Form data:
+        file: Загружаемый файл
+        
+    Returns:
+        FileUploadResponse с данными таблицы, метаданными и базовым анализом
+        
+    Raises:
+        ValidationError: Если файл не предоставлен, неверный формат или ошибка обработки
+    """
     temp_file_name = None
     try:
         if 'file' not in request.files:
@@ -482,7 +527,21 @@ def upload_file():
         pass
 
 @app.route('/api/analyze', methods=['POST'])
-def analyze():
+def analyze() -> Response:
+    """
+    Выполняет LLM анализ данных таблицы с кэшированием результатов.
+    
+    Request body (JSON):
+        provider: Провайдер LLM ('openai', 'yandex', 'giga')
+        model: Название модели
+        table_data: Массив записей таблицы
+        
+    Returns:
+        LLMAnalysisResponse с результатом анализа
+        
+    Raises:
+        ValidationError: Если отсутствуют обязательные поля или ошибка анализа
+    """
     try:
         data = request.get_json()
         if not data or 'provider' not in data or 'model' not in data or 'table_data' not in data:
@@ -499,15 +558,16 @@ def analyze():
         table_string = df.to_string(index=False, max_rows=100)
         
         # Кэширование по (provider, model, dataset_hash)
-        cache_key = _make_analysis_key(provider, model, table_string)
-        cached = _get_cached_analysis(cache_key)
+        cache_key = _analysis_cache.make_key(provider, model, table_string)
+        cached = _analysis_cache.get(cache_key)
+        
         if cached is not None:
             analysis = cached
             logger.debug("Analysis cache hit")
         else:
             # Получаем анализ от выбранной LLM
             analysis = get_analysis(provider, model, table_string)
-            _put_cached_analysis(cache_key, analysis)
+            _analysis_cache.put(cache_key, analysis)
             logger.debug("Analysis cache miss; computed and cached")
         
         logger.debug(f"Analysis completed for {provider}:{model}")
@@ -526,7 +586,19 @@ def analyze():
         raise
 
 @app.route('/api/report', methods=['POST'])
-def generate_report():
+def generate_report() -> Response:
+    """
+    Генерирует PDF отчет из HTML с санитизацией и ограничением размера.
+    
+    Request body (JSON):
+        report_html: HTML содержимое отчета (максимум 200KB)
+        
+    Returns:
+        PDF файл как attachment или JSON с ошибкой
+        
+    Raises:
+        ValidationError: Если HTML отсутствует или слишком большой
+    """
     try:
         data = request.get_json()
         if not data or 'report_html' not in data:
@@ -563,10 +635,21 @@ def generate_report():
         raise
 
 @app.route('/api/fill-missing-ai', methods=['POST'])
-def fill_missing_ai():
+def fill_missing_ai() -> Response:
     """
     Оптимизированная версия fill-missing-ai с использованием groupby вместо квадратичных операций.
     Сложность: O(N log N) вместо O(N²).
+    
+    Request body (JSON):
+        table_data: Массив записей таблицы
+        columns: Список имен колонок
+        missing_info: Словарь {column_name: [row_indices]} с информацией о пропусках
+        
+    Returns:
+        FillMissingResponse с рекомендациями по заполнению пропусков
+        
+    Raises:
+        ValidationError: Если отсутствуют обязательные поля или ошибка обработки
     """
     try:
         data = request.get_json()
@@ -657,8 +740,21 @@ def fill_missing_ai():
         raise
 
 @app.route('/api/upload/page', methods=['POST'])
-def get_upload_page():
-    """Возвращает страницу данных по dataset_id без повторной загрузки файла."""
+def get_upload_page() -> Response:
+    """
+    Возвращает страницу данных по dataset_id без повторной загрузки файла.
+    
+    Request body (JSON):
+        dataset_id: Идентификатор датасета из предыдущего запроса upload
+        page: Номер страницы (по умолчанию 1)
+        page_size: Размер страницы (по умолчанию 1000)
+        
+    Returns:
+        UploadPageResponse с данными страницы
+        
+    Raises:
+        ValidationError: Если dataset_id неверный или отсутствует, или ошибка обработки
+    """
     try:
         data = request.get_json() or {}
         dataset_id = data.get('dataset_id')
@@ -708,8 +804,11 @@ def get_upload_page():
         logger.exception("Error in /api/upload/page")
         raise
 
-def _cleanup_old_datasets():
-    """Удаляет старые датасеты из _datasets и их директории."""
+def _cleanup_old_datasets() -> None:
+    """
+    Удаляет старые датасеты из _datasets и их директории.
+    Использует TEMP_CLEANUP_AGE_MIN из конфигурации для определения возраста.
+    """
     now = time.time()
     age_sec = Config.TEMP_CLEANUP_AGE_MIN * 60
     to_remove = []
@@ -728,8 +827,11 @@ def _cleanup_old_datasets():
         _datasets.pop(dataset_id, None)
 
 @app.before_request
-def _cleanup_before_request():
-    """Периодическая очистка старых датасетов."""
+def _cleanup_before_request() -> None:
+    """
+    Периодическая очистка старых датасетов.
+    Выполняется примерно каждые 5 минут (проверяет каждый 100-й запрос).
+    """
     # Очищаем каждые 5 минут (проверяем каждый 100-й запрос примерно)
     if len(_datasets) > 0 and time.time() % 300 < 1:
         _cleanup_old_datasets()

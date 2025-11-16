@@ -44,3 +44,17 @@ frontend/build/
 
 # Python venv at project root
 .venv/
+
+# Coverage reports
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+.pytest_cache/
+coverage.xml
+*.lcov
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
